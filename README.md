@@ -1,6 +1,6 @@
 # Rethinking Two-Stage Referring-by-Tracking in Referring Multi-Object Tracking: Make it Strong Again
 
-This repository contains code for paper:
+This repository contains code for the CVPR'2026 paper:
 
 [Rethinking Two-Stage Referring-by-Tracking in Referring Multi-Object Tracking: Make it Strong Again](https://arxiv.org/abs/2503.07516)
 
