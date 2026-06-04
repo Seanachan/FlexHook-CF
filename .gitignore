@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Model weights / checkpoints (downloaded or trained — not for VCS)
+*.pth
+*.pt
+*.bin
+*.safetensors
+
+# Training / evaluation output dirs
+/kitti-1/
+/kitti-2/
+/dance/
+/mix/
+/retest-*/
+output/
+
+# Generated counterfactuals can be large; keep out of VCS by default
+counterfactuals.json
+
+# OS
+.DS_Store

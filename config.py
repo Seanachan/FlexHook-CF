@@ -159,6 +159,15 @@ _C.CLIP_PATH = 'pretrained/CLIP/RN50.pt'
 _C.ROBERTA_PATH = 'pretrained/roberta-base'
 _C.LRE = 1
 
+# -----------------------------------------------------------------------------
+# Counterfactual Hard-Negative Learning (FlexHook-CF graft)
+# Defaults below are a no-op: LAMBDA_CF=0 and N_CF=0 reproduce vanilla FlexHook.
+# -----------------------------------------------------------------------------
+_C.LAMBDA_CF = 0.0          # weight of the counterfactual push-loss; 0 disables it
+_C.N_CF = 0                 # max counterfactual negatives injected per sample; 0 disables injection
+_C.CF_JSON_PATH = ''        # path to counterfactuals.json (base-expression -> [variants]); empty disables
+_C.CF_ATTR_TYPES = ['color', 'type', 'motion', 'location']  # attribute categories allowed for injection
+
 def _update_config_from_file(config, cfg_file):
     config.defrost()
     with open(cfg_file, 'r') as f:
@@ -212,6 +221,12 @@ def update_config(config, args):
     # print(_check_args('lre'))
     if _check_args('lre'):
         config.LRE = args.lre
+    if _check_args('lambda_cf'):
+        config.LAMBDA_CF = args.lambda_cf
+    if _check_args('n_cf'):
+        config.N_CF = args.n_cf
+    if _check_args('cf_json'):
+        config.CF_JSON_PATH = args.cf_json
     # print(config.LRE)
     # print(hasattr(args, 'lre'))
     # print( eval(f'args.lre'))

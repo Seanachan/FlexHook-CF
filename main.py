@@ -93,6 +93,11 @@ def parse_option():
     
     parser.add_argument('--lre', type=int, help='LRE.')
 
+    # FlexHook-CF: counterfactual hard-negative learning
+    parser.add_argument('--lambda-cf', type=float, help='weight of the counterfactual push-loss')
+    parser.add_argument('--n-cf', type=int, help='max counterfactual negatives injected per sample')
+    parser.add_argument('--cf-json', type=str, help='path to counterfactuals.json')
+
     args, unparsed = parser.parse_known_args()
 
     config = get_config(args)
@@ -358,7 +363,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.time()
     end = time.time()
     sample_dict_for_save={}
-    for idx, (samples, pes,bbox_gt,targets, expid,expma, data_key,sampled_indices,sampled_target_exp,index) in enumerate(data_loader):
+    for idx, (samples, pes,bbox_gt,targets, expid,expma, data_key,sampled_indices,sampled_target_exp,index,is_cf) in enumerate(data_loader):
 
         samples = samples.cuda(non_blocking=True) #btchw
 
@@ -436,7 +441,19 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 loss_refer = (entropy**config.entropy)*loss_refer
 
             loss = (loss_refer*pos_weight).mean()
-        
+
+        '''FlexHook-CF counterfactual push-loss: push the match probability of
+        injected single-attribute counterfactual negatives toward 0 on the
+        target object. L_cf = -log(1 - P_match) over CF slots. No-op when
+        LAMBDA_CF<=0 or no CF slots present in the batch.'''
+        if config.LAMBDA_CF > 0:
+            cf_mask = is_cf.cuda(non_blocking=True).unsqueeze(1).repeat(1, t_, 1).flatten().float()
+            if cf_mask.sum() > 0:
+                p_match = outputs.flatten(0, 2).softmax(-1)[:, 1]
+                loss_cf = -torch.log((1.0 - p_match).clamp_min(1e-6))
+                loss_cf = (loss_cf * cf_mask).sum() / cf_mask.sum()
+                loss = loss + config.LAMBDA_CF * loss_cf
+
         loss = loss+regular
 
         optimizer.zero_grad()

@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from transformers import RobertaTokenizerFast, BertTokenizerFast
 from .utils import *
+from .cf_utils import inject_counterfactuals, load_counterfactuals
 # from opts import opt
 
 
@@ -145,7 +146,18 @@ class RMOT_Dataset(Dataset):
 
         if not opt.noise1 :
             assert self.sample_frame_len == self.sample_frame_num
-        
+
+        '''Counterfactual hard-negative learning (FlexHook-CF). Train-only; a
+        no-op when N_CF<=0 or no counterfactuals.json is provided.'''
+        self.cf_json_path = getattr(opt, 'CF_JSON_PATH', '')
+        self.n_cf = int(getattr(opt, 'N_CF', 0))
+        _attr = getattr(opt, 'CF_ATTR_TYPES', None)
+        self.cf_attr_types = list(_attr) if _attr else None
+        if self.mode == 'train' and self.n_cf > 0:
+            self.counterfactuals = load_counterfactuals(self.cf_json_path)
+        else:
+            self.counterfactuals = {}
+
         '''parse data'''
         self.data,self.sample_dict,self.last,self.sample_node = self._parse_data()
 
@@ -582,6 +594,17 @@ class RMOT_Dataset(Dataset):
 
             sampled_target_exp = data_key.split('_')[-1].split('+')
 
+        '''Inject counterfactual hard negatives (train only). Replaces negative
+        slots with single-attribute perturbations of this object's positives;
+        keeps N fixed so the model path is unchanged. is_cf marks injected slots.'''
+        is_cf_list = [0] * len(sampled_target_exp)
+        if self.mode == 'train' and self.n_cf > 0 and self.counterfactuals:
+            pos_exps = data['expression'][sampled_indices[-1]]
+            sampled_target_exp, is_cf_list = inject_counterfactuals(
+                sampled_target_exp, pos_exps, self.counterfactuals,
+                self.n_cf, self.cf_attr_types, rng=random,
+            )
+
         '''Complete tokenization directly in the dataset to improve processing efficiency'''
         if self.opt.TEXT == 'clip':
             # print()
@@ -606,7 +629,7 @@ class RMOT_Dataset(Dataset):
             return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask
         
         elif self.mode == 'train':
-            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask,data_key,torch.tensor(sampled_indices),sampled_target_exp,index
+            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask,data_key,torch.tensor(sampled_indices),sampled_target_exp,index,torch.tensor(is_cf_list,dtype=torch.long)
         
         # if not self.mode == 'test':
         #     return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask
