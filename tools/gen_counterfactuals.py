@@ -137,6 +137,8 @@ def _llm_counterfactuals(expression, k, attr_types, backend, model):
             temperature=0.7,
         )
         text = resp.choices[0].message.content
+    elif backend == 'ollama':
+        text = _ollama_chat(prompt, model or 'qwen3-vl:8b')
     elif backend == 'local':
         from transformers import pipeline  # lazy
         gen = pipeline('text-generation', model=model or 'Qwen/Qwen2.5-3B-Instruct')
@@ -157,6 +159,32 @@ def _llm_counterfactuals(expression, k, attr_types, backend, model):
             continue
         clean.append({'expression': s, 'attr_type': a or 'unknown'})
     return clean[:k]
+
+
+def _ollama_chat(prompt, model):
+    """Query a local ollama server's OpenAI-free /api/chat endpoint (stdlib only).
+
+    Host from $OLLAMA_HOST (default http://localhost:11434). format=json
+    constrains the model to emit valid JSON so _parse_json_list rarely falls back.
+    """
+    import urllib.request  # lazy, stdlib
+
+    host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
+    if not host.startswith('http'):
+        host = 'http://' + host
+    payload = json.dumps({
+        'model': model,
+        'messages': [{'role': 'user', 'content': prompt}],
+        'stream': False,
+        'format': 'json',
+        'options': {'temperature': 0.7},
+    }).encode()
+    req = urllib.request.Request(
+        host.rstrip('/') + '/api/chat',
+        data=payload, headers={'Content-Type': 'application/json'},
+    )
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return json.loads(r.read())['message']['content']
 
 
 def _parse_json_list(text):
@@ -210,8 +238,8 @@ def main():
     ap.add_argument('--data-root', required=True, help='dataset root containing expression/ and labels.json')
     ap.add_argument('--dataset', default='kitti-1', choices=['kitti-1', 'kitti-2', 'dance'])
     ap.add_argument('--out', required=True, help='output counterfactuals.json path')
-    ap.add_argument('--backend', default='rule', choices=['rule', 'openai', 'local'])
-    ap.add_argument('--model', default=None, help='model name for openai/local backends')
+    ap.add_argument('--backend', default='rule', choices=['rule', 'openai', 'ollama', 'local'])
+    ap.add_argument('--model', default=None, help='model name for openai/ollama/local backends')
     ap.add_argument('--k', type=int, default=4, help='variants per expression')
     ap.add_argument('--attr-types', nargs='+', default=None,
                     help='restrict to these attribute categories (color type motion location)')
