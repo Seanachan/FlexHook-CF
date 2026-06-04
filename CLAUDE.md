@@ -75,7 +75,7 @@ Enable CF during training by appending to the `main.py` args:
 - CF-as-CE ablation: `--n-cf 3 --lambda-cf 0   --cf-json <data_root>/counterfactuals.json`
 - CF-push (full method): `--n-cf 3 --lambda-cf 1.0 --cf-json <data_root>/counterfactuals.json`
 
-Project plan, phase status, and the full ablation/run matrix live in `../PLAN.md`.
+Project plan, phase status, and the full ablation/run matrix live in `PLAN.md`.
 
 ## Gotchas
 
