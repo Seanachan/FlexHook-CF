@@ -50,11 +50,14 @@ def generate_final_results(config, cls_dict, data_dir, track_dir, save_dir, thr_
     给定`test_tracking`输出的结果，生成最终跟踪结果
     - cls_dict: video->id->frame->exp->
     """
-    template_dir = join(data_dir, 'gt_template')
+    # V2: gt_template/ only has 0011 in our install; gt_template_gen has all 4 test seqs.
+    # V1: gt_template/ has all 3 test seqs (0005/0011/0013).
+    _gt_gen = join(data_dir, 'gt_template_gen')
+    template_dir = _gt_gen if exists(_gt_gen) else join(data_dir, 'gt_template')
     if exists(save_dir):
         shutil.rmtree(save_dir)
     for video in os.listdir(template_dir):
-        
+
         if video not in cls_dict:
             continue
         video_dir_in = join(template_dir, video)
@@ -103,6 +106,11 @@ def generate_final_results(config, cls_dict, data_dir, track_dir, save_dir, thr_
                     exp_input = json.load(open(os.path.join(config.data_root,'expression',video,exp)))['sentence']
                     
                     exp_dir_out = join(video_dir_out, exp.replace('.json',''))
+                    # Some expressions exist in expression/ but have no matching
+                    # gt_template/{video}/{exp}/ dir, so the mkdir loop above skipped
+                    # them. Create on demand so the 'a' open below doesn't crash.
+                    if not exists(exp_dir_out):
+                        os.makedirs(exp_dir_out, exist_ok=True)
 
                     score = frame_dict[exp_input]
                     with open(join(exp_dir_out, 'predict.txt'), 'a') as f:
@@ -162,6 +170,11 @@ def generate_final_results_dance(config, cls_dict, data_dir, track_dir, save_dir
                     exp_input = json.load(open(os.path.join(config.data_root,'expression',video,exp)))['sentence']
 
                     exp_dir_out = join(video_dir_out, exp.replace('.json',''))
+                    # Some expressions exist in expression/ but have no matching
+                    # gt_template/{video}/{exp}/ dir, so the mkdir loop above skipped
+                    # them. Create on demand so the 'a' open below doesn't crash.
+                    if not exists(exp_dir_out):
+                        os.makedirs(exp_dir_out, exist_ok=True)
 
                     score = frame_dict[exp_input]
                     with open(join(exp_dir_out, 'predict.txt'), 'a') as f:
