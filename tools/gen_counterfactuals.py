@@ -117,12 +117,17 @@ def rule_based_counterfactuals(expression, k=4, attr_types=None, rng=None):
 # LLM backends (optional). Lazy imports so the rule backend needs nothing.
 # --------------------------------------------------------------------------- #
 _LLM_PROMPT = (
-    "You rewrite referring expressions for multi-object tracking. "
-    "Given an expression describing some objects, produce {k} variants. "
-    "In each variant change EXACTLY ONE attribute (color, object type, motion, "
-    "or location) to describe a DIFFERENT object; keep every other word identical. "
-    "Return strict JSON: a list of objects with keys 'expression' and 'attr_type' "
-    "(one of color/type/motion/location). Expression: \"{expr}\""
+    "You make hard-negative variants of a referring expression for multi-object tracking. "
+    "Produce {k} variants. RULES, follow strictly:\n"
+    "1. Copy the ENTIRE original sentence verbatim, then replace EXACTLY ONE word.\n"
+    "2. Do NOT rephrase, reorder, add, or remove any other word. Same length, same structure.\n"
+    "3. The replaced word must change ONE attribute so it describes a DIFFERENT object: "
+    "color (white->red), object type (car->van, woman->man), motion (moving->parked), "
+    "or location (left->right). Replace it with a contrasting value of the SAME attribute, "
+    "never a broader/narrower term (do not turn 'woman' into 'person').\n"
+    "4. attr_type must be exactly one of: color, type, motion, location, matching the word you changed.\n"
+    "Return strict JSON: a list of objects with keys 'expression' and 'attr_type'. "
+    "Expression: \"{expr}\""
 )
 
 
@@ -187,15 +192,38 @@ def _ollama_chat(prompt, model):
         return json.loads(r.read())['message']['content']
 
 
+def _coerce_list(obj):
+    """Normalize an LLM's parsed JSON into a list of variant dicts.
+
+    LLMs with format=json often wrap the list in an object, e.g.
+    {"objects": [...]}, {"variants": [...]}, a single {expression, attr_type},
+    or {"1": {...}, "2": {...}}. Unwrap all of these to a plain list.
+    """
+    if obj is None:
+        return []
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for v in obj.values():               # {"objects": [...]} style
+            if isinstance(v, list):
+                return v
+        if 'expression' in obj:              # a single variant object
+            return [obj]
+        vals = list(obj.values())            # {"1": {...}, "2": {...}} style
+        if vals and all(isinstance(v, dict) for v in vals):
+            return vals
+    return []
+
+
 def _parse_json_list(text):
-    """Best-effort extraction of a JSON list from an LLM response."""
+    """Best-effort extraction of a JSON list of variants from an LLM response."""
     try:
-        return json.loads(text)
+        return _coerce_list(json.loads(text))
     except Exception:
         m = re.search(r'\[.*\]', text, re.S)
         if m:
             try:
-                return json.loads(m.group(0))
+                return _coerce_list(json.loads(m.group(0)))
             except Exception:
                 return []
     return []
@@ -253,28 +281,52 @@ def main():
     exprs = collect_expressions(args.data_root, args.dataset, args.videos)
     print(f'collected {len(exprs)} unique expressions from {args.data_root}')
 
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+
+    # Resume: reuse any expressions already generated in a prior (interrupted) run.
     result = {}
-    n_variants = 0
+    if os.path.exists(args.out):
+        try:
+            result = json.load(open(args.out))
+            print(f'resuming: {len(result)} expressions already in {args.out}')
+        except Exception:
+            result = {}
+
+    def _save():
+        with open(args.out, 'w') as f:
+            json.dump(result, f, ensure_ascii=False, indent=1)
+
+    n_variants = sum(len(v) for v in result.values())
     n_empty = 0
-    for expr in exprs:
-        if args.backend == 'rule':
-            variants = rule_based_counterfactuals(expr, args.k, args.attr_types, rng=rng)
-        else:
-            variants = _llm_counterfactuals(expr, args.k, args.attr_types, args.backend, args.model)
-        # Validation: drop any variant equal to the source or not a single edit.
+    n_err = 0
+    for i, expr in enumerate(exprs):
+        if expr in result:                       # already done (resume)
+            continue
+        try:
+            if args.backend == 'rule':
+                variants = rule_based_counterfactuals(expr, args.k, args.attr_types, rng=rng)
+            else:
+                variants = _llm_counterfactuals(expr, args.k, args.attr_types, args.backend, args.model)
+        except Exception as e:                   # LLM timeout / bad response: skip, keep going
+            n_err += 1
+            if n_err <= 20 or n_err % 50 == 0:
+                print(f'  [warn] expr {i}/{len(exprs)} failed ({n_err} total): {type(e).__name__}: {e}')
+            continue
+        # Validation: drop any variant equal to the source.
         variants = [v for v in variants if v['expression'].lower() != expr.lower()]
         if not variants:
             n_empty += 1
             continue
         result[expr] = variants
         n_variants += len(variants)
+        if (i + 1) % 200 == 0:                   # periodic checkpoint + progress
+            _save()
+            print(f'  ...{i + 1}/{len(exprs)} processed, {len(result)} with CF, '
+                  f'{n_variants} variants, {n_empty} empty, {n_err} errors')
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
-    with open(args.out, 'w') as f:
-        json.dump(result, f, ensure_ascii=False, indent=1)
-
+    _save()
     print(f'wrote {args.out}: {len(result)} expressions with counterfactuals, '
-          f'{n_variants} total variants, {n_empty} expressions had no perturbable attribute')
+          f'{n_variants} total variants, {n_empty} empty, {n_err} errors')
 
 
 if __name__ == '__main__':
