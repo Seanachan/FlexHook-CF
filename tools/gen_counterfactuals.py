@@ -126,9 +126,22 @@ _LLM_PROMPT = (
     "or location (left->right). Replace it with a contrasting value of the SAME attribute, "
     "never a broader/narrower term (do not turn 'woman' into 'person').\n"
     "4. attr_type must be exactly one of: color, type, motion, location, matching the word you changed.\n"
+    "5. Do NOT add quotation marks around the expression. Never output the original sentence unchanged.\n"
     "Return strict JSON: a list of objects with keys 'expression' and 'attr_type'. "
-    "Expression: \"{expr}\""
+    "Expression: {expr}"
 )
+
+
+def _clean_expr(s):
+    """Strip stray quotation marks / whitespace an LLM may wrap around output."""
+    if not s:
+        return s
+    return s.strip().strip('"').strip("'").strip()
+
+
+def _norm_expr(s):
+    """Normalize for equality checks: lowercase, collapse whitespace, drop quotes."""
+    return re.sub(r'\s+', ' ', _clean_expr(s or '').lower())
 
 
 def _llm_counterfactuals(expression, k, attr_types, backend, model):
@@ -154,11 +167,15 @@ def _llm_counterfactuals(expression, k, attr_types, backend, model):
     variants = _parse_json_list(text)
     # Validate + filter to allowed attribute types and true one-attribute edits.
     allowed = set(attr_types) if attr_types else None
+    src_norm = _norm_expr(expression)
     clean = []
     for v in variants:
         s = v.get('expression') if isinstance(v, dict) else None
         a = v.get('attr_type') if isinstance(v, dict) else None
-        if not s or s.lower() == expression.lower():
+        s = _clean_expr(s)                       # strip stray quotes / whitespace
+        # Reject empties and verbatim copies (LLMs echo the original with quotes,
+        # which would slip a false-positive in as a "negative").
+        if not s or _norm_expr(s) == src_norm:
             continue
         if allowed is not None and a not in allowed:
             continue
