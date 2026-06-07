@@ -167,6 +167,8 @@ _C.LAMBDA_CF = 0.0          # weight of the counterfactual push-loss; 0 disables
 _C.N_CF = 0                 # max counterfactual negatives injected per sample; 0 disables injection
 _C.CF_JSON_PATH = ''        # path to counterfactuals.json (base-expression -> [variants]); empty disables
 _C.CF_ATTR_TYPES = ['color', 'type', 'motion', 'location']  # attribute categories allowed for injection
+_C.CF_LOSS = 'push'         # CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-CF_MARGIN))
+_C.CF_MARGIN = 0.5          # threshold for the 'margin' hinge; only CFs scored above it are penalized
 
 def _update_config_from_file(config, cfg_file):
     config.defrost()
@@ -227,6 +229,10 @@ def update_config(config, args):
         config.N_CF = args.n_cf
     if _check_args('cf_json'):
         config.CF_JSON_PATH = args.cf_json
+    if _check_args('cf_loss'):
+        config.CF_LOSS = args.cf_loss
+    if _check_args('cf_margin'):
+        config.CF_MARGIN = args.cf_margin
     # print(config.LRE)
     # print(hasattr(args, 'lre'))
     # print( eval(f'args.lre'))

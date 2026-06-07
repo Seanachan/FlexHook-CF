@@ -94,9 +94,11 @@ def parse_option():
     parser.add_argument('--lre', type=int, help='LRE.')
 
     # FlexHook-CF: counterfactual hard-negative learning
-    parser.add_argument('--lambda-cf', type=float, help='weight of the counterfactual push-loss')
+    parser.add_argument('--lambda-cf', type=float, help='weight of the counterfactual loss')
     parser.add_argument('--n-cf', type=int, help='max counterfactual negatives injected per sample')
     parser.add_argument('--cf-json', type=str, help='path to counterfactuals.json')
+    parser.add_argument('--cf-loss', type=str, choices=['push', 'margin'], help="CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-margin))")
+    parser.add_argument('--cf-margin', type=float, help="threshold for the 'margin' CF loss hinge")
 
     args, unparsed = parser.parse_known_args()
 
@@ -442,15 +444,22 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
             loss = (loss_refer*pos_weight).mean()
 
-        '''FlexHook-CF counterfactual push-loss: push the match probability of
-        injected single-attribute counterfactual negatives toward 0 on the
-        target object. L_cf = -log(1 - P_match) over CF slots. No-op when
-        LAMBDA_CF<=0 or no CF slots present in the batch.'''
+        '''FlexHook-CF counterfactual loss over injected single-attribute
+        counterfactual negatives. Two modes (config.CF_LOSS):
+          'push'   : L_cf = -log(1 - P_match)        (original; pushes every CF
+                     slot toward 0 -> suppresses detection, taxes DetA)
+          'margin' : L_cf = relu(P_match - CF_MARGIN) (hinge; zero gradient on
+                     CFs already scored below the margin -> push concentrated on
+                     hard negatives only, leaves DetA alone)
+        No-op when LAMBDA_CF<=0 or no CF slots present in the batch.'''
         if config.LAMBDA_CF > 0:
             cf_mask = is_cf.cuda(non_blocking=True).unsqueeze(1).repeat(1, t_, 1).flatten().float()
             if cf_mask.sum() > 0:
                 p_match = outputs.flatten(0, 2).softmax(-1)[:, 1]
-                loss_cf = -torch.log((1.0 - p_match).clamp_min(1e-6))
+                if config.CF_LOSS == 'margin':
+                    loss_cf = F.relu(p_match - config.CF_MARGIN)
+                else:
+                    loss_cf = -torch.log((1.0 - p_match).clamp_min(1e-6))
                 loss_cf = (loss_cf * cf_mask).sum() / cf_mask.sum()
                 loss = loss + config.LAMBDA_CF * loss_cf
 
