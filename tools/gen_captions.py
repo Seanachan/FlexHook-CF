@@ -171,10 +171,38 @@ def collect_tracker_trajectories(track_root, img_root, videos):
     return trajs
 
 
+def collect_gt_trajectories(data_root, videos, min_frames=1):
+    """train mode: read labels.json GT trajectories; key f'{video}_{obj_id}'.
+
+    labels[video][obj_id][frame_id]['bbox'] = normalized [x,y,w,h] (top-left).
+    Mirrors data/mydataloader.py::_parse_data train branch keying. Boxes kept
+    normalized (converted to pixels at crop time using the actual image size).
+    """
+    labels = json.load(open(os.path.join(data_root, 'labels.json')))
+    vids = videos if videos else sorted(labels.keys())
+    trajs = {}
+    for video in vids:
+        if video not in labels:
+            continue
+        for obj_id, obj_label in labels[video].items():
+            boxes = []
+            for frame_id, frame_label in obj_label.items():
+                if 'bbox' not in frame_label:
+                    continue
+                x, y, w, h = frame_label['bbox']
+                boxes.append((int(frame_id), float(x), float(y), float(w), float(h)))
+            if len(boxes) < min_frames:
+                continue
+            boxes.sort(key=lambda b: b[0])
+            trajs[f'{video}_{obj_id}'] = {'video': video, 'boxes': boxes, 'normalized': True}
+    return trajs
+
+
 def caption_trajectory(traj, img_root, model, k_frames, host):
     """Crop k representative frames of a trajectory, send to VLM, return caption."""
     video = traj['video']
     boxes = traj['boxes']
+    norm = traj.get('normalized', False)
     frame_ids = [b[0] for b in boxes]
     chosen = set(pick_frames(frame_ids, k_frames))
     imgs_b64 = []
@@ -185,7 +213,10 @@ def caption_trajectory(traj, img_root, model, k_frames, host):
         if not os.path.exists(ip):
             continue
         try:
-            crop = crop_box(Image.open(ip), x, y, w, h)
+            img = Image.open(ip)
+            if norm:  # GT boxes are normalized -> convert to pixels
+                x, y, w, h = x * img.width, y * img.height, w * img.width, h * img.height
+            crop = crop_box(img, x, y, w, h)
         except Exception:
             crop = None
         if crop is not None:
@@ -203,6 +234,8 @@ def main():
     ap = argparse.ArgumentParser(description='Generate VLM trajectory captions for FlexHook-CF ESI')
     ap.add_argument('--mode', choices=['eval', 'train'], default='eval')
     ap.add_argument('--track-root', help='tracker_outputs/<ROOT> (eval mode)')
+    ap.add_argument('--data-root', help='dataset root with labels.json (train mode)')
+    ap.add_argument('--min-frames', type=int, default=1, help='train mode: skip trajectories shorter than this')
     ap.add_argument('--img-root', required=True,
                     help='image dir, e.g. datasets/refer-kitti-v2/KITTI/training/image_02')
     ap.add_argument('--out', required=True, help='output captions json')
@@ -214,11 +247,13 @@ def main():
     host = os.environ.get('OLLAMA_HOST', 'http://localhost:11434')
 
     if args.mode == 'train':
-        raise SystemExit('train mode (GT/labels.json) is added in Stage 1; use --mode eval for the Stage-0 gate.')
-    if not args.track_root:
-        raise SystemExit('--track-root required for --mode eval')
-
-    trajs = collect_tracker_trajectories(args.track_root, args.img_root, args.videos)
+        if not args.data_root:
+            raise SystemExit('--data-root (with labels.json) required for --mode train')
+        trajs = collect_gt_trajectories(args.data_root, args.videos, args.min_frames)
+    else:
+        if not args.track_root:
+            raise SystemExit('--track-root required for --mode eval')
+        trajs = collect_tracker_trajectories(args.track_root, args.img_root, args.videos)
     keys = sorted(trajs)
     if args.limit:
         keys = keys[:args.limit]
