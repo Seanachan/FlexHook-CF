@@ -202,6 +202,26 @@ class MyModel(nn.Module):
 
         self.absolute_lang_pos_embed = nn.Parameter(torch.zeros(1, self.text_len, self.text_dim))
 
+        '''ESI+HMSI: per-layer modules that denoise an object-level caption against
+        the trajectory visual feature and gate-fuse it into a holistic token,
+        injected as a 4th K/V stream. Gated on cfg.ESI_ENABLED -> no params, no-op
+        when disabled (vanilla FlexHook). Caption encoded by the frozen text encoder.'''
+        self.esi_enabled = bool(getattr(cfg, 'ESI_ENABLED', False))
+        self.esi_kv_len = int(getattr(cfg, 'ESI_KV_LEN', 1))
+        if self.esi_enabled:
+            self.hmsi_cap_norm = nn.ModuleList()
+            self.hmsi_cap_proj = nn.ModuleList()
+            self.hmsi_ca = nn.ModuleList()
+            self.hmsi_gate = nn.ModuleList()
+            self.hmsi_fuse_norm = nn.ModuleList()
+            self.hmsi_out = nn.ModuleList()
+            for i_layer in range(self.num_layers):
+                self.hmsi_cap_norm.append(nn.LayerNorm(self.text_dim))
+                self.hmsi_cap_proj.append(Mlp_resid(self.text_dim, self.text_dim, self.text_dim))
+                self.hmsi_ca.append(CATransformerBlockTest(layer_id=i_layer, dim=self.text_dim, n_heads=8, norm_eps=None, drop_out=0.0))
+                self.hmsi_gate.append(nn.Linear(self.text_dim * 2, self.text_dim))
+                self.hmsi_fuse_norm.append(nn.LayerNorm(self.text_dim))
+                self.hmsi_out.append(Mlp_resid(self.text_dim, self.text_dim, self.text_dim))
 
         if cfg.freeze_text:
             print('freeze text encoder !!!')
@@ -215,12 +235,12 @@ class MyModel(nn.Module):
                 if pn.startswith('backbone'):
                     p.requires_grad_(False)
 
-    def forward(self, x, pes,bbox_gt, expid,expma):
-        outs,l,text_mask = self.forward_features(x, expid,expma)
-        x = self.decode(outs,l,text_mask,pes,bbox_gt)
+    def forward(self, x, pes,bbox_gt, expid,expma, cap_id=None, cap_mask=None):
+        outs,l,text_mask,cap_feat = self.forward_features(x, expid,expma, cap_id, cap_mask)
+        x = self.decode(outs,l,text_mask,pes,bbox_gt, cap_feat, cap_mask)
         return x
-    
-    def forward_features(self, inputs,expid,expma):
+
+    def forward_features(self, inputs,expid,expma, cap_id=None, cap_mask=None):
         #print(exp)
         #pos = pes.flatten(0,1).permute(0,2,3,1) # bt,h,w,2
         #x = inputs[:,:,:3] 
@@ -258,9 +278,18 @@ class MyModel(nn.Module):
 
         #rec_q = encoded_text #b (tl) c
 
-        return outputs,encoded_text,text_mask#,encoded_text
+        '''ESI: encode the object-level caption (one per trajectory, no N axis)
+        with the same frozen text encoder. cap_feat=(B, caption_len, C).'''
+        cap_feat = None
+        if self.esi_enabled and cap_id is not None:
+            if hasattr(self.text_encoder,'encode_text_cpany'):
+                cap_feat = self.text_encoder.encode_text_cpany(cap_id)
+            else:
+                cap_feat = self.text_encoder(cap_id, cap_mask).last_hidden_state
 
-    def decode(self,outputs,text,text_mask,pos_raw,bbox_gt):
+        return outputs,encoded_text,text_mask,cap_feat#,encoded_text
+
+    def decode(self,outputs,text,text_mask,pos_raw,bbox_gt, cap_feat=None, cap_mask=None):
 
         n = self.sample_expression_num
         b,t,_,h,w = pos_raw.shape
@@ -331,8 +360,25 @@ class MyModel(nn.Module):
 
 
             #pooltext = text.mean(1)
-            kv = torch.cat([text.flatten(1,2),conditional_f,obj_f],dim=1) #
-            kvpos = torch.cat([text_pos.flatten(1,2),torch.zeros_like(conditional_f),torch.zeros_like(obj_f)],dim=1)
+            '''ESI+HMSI: denoise the object-level caption against this trajectory's
+            visual feature (obj_f), gate-fuse into a holistic token, append as a
+            4th K/V stream visible to all N expressions. None -> vanilla 3-stream.'''
+            caption_f = None
+            if self.esi_enabled and cap_feat is not None:
+                cap_l = self.hmsi_cap_proj[i](self.hmsi_cap_norm[i](cap_feat))            # (B, cap_len, C)
+                cap_refined = self.hmsi_ca[i](cap_l, obj_f, None, None, None)             # (B, cap_len, C)
+                m = cap_mask.unsqueeze(-1).float()                                       # (B, cap_len, 1)
+                cap_vec = (cap_refined*m).sum(1,keepdim=True)/m.sum(1,keepdim=True).clamp_min(1e-6)  # (B,1,C)
+                obj_vec = obj_f.mean(1,keepdim=True)                                     # (B,1,C)
+                g = torch.sigmoid(self.hmsi_gate[i](torch.cat([obj_vec,cap_vec],dim=-1)))# (B,1,C)
+                caption_f = self.hmsi_out[i](self.hmsi_fuse_norm[i](obj_vec + g*cap_vec))# (B,1,C)
+
+            if caption_f is not None:
+                kv = torch.cat([text.flatten(1,2),conditional_f,obj_f,caption_f],dim=1)
+                kvpos = torch.cat([text_pos.flatten(1,2),torch.zeros_like(conditional_f),torch.zeros_like(obj_f),torch.zeros_like(caption_f)],dim=1)
+            else:
+                kv = torch.cat([text.flatten(1,2),conditional_f,obj_f],dim=1) #
+                kvpos = torch.cat([text_pos.flatten(1,2),torch.zeros_like(conditional_f),torch.zeros_like(obj_f)],dim=1)
             # kvpos = torch.cat([text_pos,self.absolute_pos_objf_embed[i].repeat(b*n,1,1)],dim=1)
 
             # rec_atten_mask = torch.zeros((b,n,1,1,self.text_len+obj_f.shape[1]+10),device=rec_q.device)
@@ -344,15 +390,21 @@ class MyModel(nn.Module):
             #                             None,kvpos,
             #                             rec_atten_mask.flatten(0,1)) #b*8,2,c
 
-            rec_atten_mask = torch.zeros((b,1,n,self.text_len*n+self.condition_num*n+obj_f.shape[1]),device=rec_q.device)
-            
+            cap_len = caption_f.shape[1] if caption_f is not None else 0
+            obj_start = self.text_len*n + self.condition_num*n
+            rec_atten_mask = torch.zeros((b,1,n, obj_start + obj_f.shape[1] + cap_len),device=rec_q.device)
+
             for j in range(self.sample_expression_num):
                 rec_atten_mask[:,0,j,j*self.text_len:(j+1)*self.text_len]=text_mask[:,j]#.unsqueeze(1).repeat(1,self.qnum,1)
                 rec_atten_mask[:,0,j,n*self.text_len+j*self.condition_num:n*self.text_len+(j+1)*self.condition_num]=1#.unsqueeze(1).repeat(1,self.qnum,1)
 
-            # rec_atten_mask[:,:,:,:,-obj_f.shape[1]:]=1
-            rec_atten_mask[:,:,:,-obj_f.shape[1]:]=1
-                
+            # object features visible to all N expressions. Anchored by explicit
+            # start index (NOT the trailing slice) so an ESI caption block can follow.
+            rec_atten_mask[:,:,:, obj_start:obj_start+obj_f.shape[1]]=1
+            if cap_len:
+                # caption is object-level -> visible to all N expressions (like obj_f)
+                rec_atten_mask[:,:,:, obj_start+obj_f.shape[1]:]=1
+
             rec_atten_mask = rec_atten_mask.bool()
             rec_q = self.output_ca_qkv[i](rec_q,kv,
                                         None,kvpos,

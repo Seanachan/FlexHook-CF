@@ -16,7 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from transformers import RobertaTokenizerFast, BertTokenizerFast
 from .utils import *
-from .cf_utils import inject_counterfactuals, load_counterfactuals
+from .cf_utils import inject_counterfactuals, load_counterfactuals, load_captions
 # from opts import opt
 
 
@@ -157,6 +157,18 @@ class RMOT_Dataset(Dataset):
             self.counterfactuals = load_counterfactuals(self.cf_json_path)
         else:
             self.counterfactuals = {}
+
+        '''ESI captions (object-level, used at train AND inference). train/val
+        iterate GT trajectories -> ESI_CAP_TRAIN_JSON; test iterates tracker
+        trajectories -> ESI_CAP_EVAL_JSON. No-op when ESI_ENABLED is False.'''
+        self.esi_enabled = bool(getattr(opt, 'ESI_ENABLED', False))
+        self.esi_caption_len = int(getattr(opt, 'ESI_CAPTION_LEN', self.text_len))
+        if self.esi_enabled:
+            cap_path = getattr(opt, 'ESI_CAP_TRAIN_JSON', '') if self.mode in ('train', 'val') \
+                else getattr(opt, 'ESI_CAP_EVAL_JSON', '')
+            self.captions = load_captions(cap_path)
+        else:
+            self.captions = {}
 
         '''parse data'''
         self.data,self.sample_dict,self.last,self.sample_node = self._parse_data()
@@ -617,6 +629,21 @@ class RMOT_Dataset(Dataset):
             sampled_target_ids = out['input_ids']
             sampled_target_mask = out['attention_mask']
 
+        '''ESI: tokenize this trajectory's object-level caption (one per traj).
+        Always emitted (empty string when disabled/missing) so the batch tuple
+        shape is stable; the model skips the HMSI branch when ESI is off.'''
+        cap_text = self.captions.get(f'{video}_{obj}', '') if self.captions else ''
+        if self.opt.TEXT == 'clip':
+            cap_out, cap_ma = self.tokenizer([cap_text])
+            caption_ids = cap_out[0]
+            caption_mask = cap_ma[0]
+        else:
+            cap_out = self.tokenizer.batch_encode_plus(
+                [cap_text], padding="max_length", return_tensors='pt',
+                truncation=True, max_length=self.esi_caption_len)
+            caption_ids = cap_out['input_ids'][0]
+            caption_mask = cap_out['attention_mask'][0]
+
         '''load gt label for each expression during val and train'''
         if not self.mode == 'test':
             label = torch.tensor([1 if i in data['expression'][sampled_indices[-1]] else 0 for i in sampled_target_exp] )
@@ -626,16 +653,16 @@ class RMOT_Dataset(Dataset):
             frame_id = data['bbox'][sampled_indices[-1]][0]
 
         if self.mode == 'val':
-            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask
-        
+            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask,caption_ids,caption_mask
+
         elif self.mode == 'train':
-            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask,data_key,torch.tensor(sampled_indices),sampled_target_exp,index,torch.tensor(is_cf_list,dtype=torch.long)
-        
+            return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask,data_key,torch.tensor(sampled_indices),sampled_target_exp,index,torch.tensor(is_cf_list,dtype=torch.long),caption_ids,caption_mask
+
         # if not self.mode == 'test':
         #     return images,global_pe,bbox_gt,label.long(),sampled_target_ids,sampled_target_mask
         else:
             '''Return the obj information during test for generation of final results'''
-            return images,global_pe,bbox_gt,sampled_target_exp,sampled_target_ids,sampled_target_mask,video,str(obj),str(frame_id),self.last[data_key]#,raw_sentence
+            return images,global_pe,bbox_gt,sampled_target_exp,sampled_target_ids,sampled_target_mask,video,str(obj),str(frame_id),self.last[data_key],caption_ids,caption_mask#,raw_sentence
             
 
     def __len__(self):

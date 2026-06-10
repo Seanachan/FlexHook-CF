@@ -143,7 +143,9 @@ class MyModel_noLRE(nn.Module):
                 if pn.startswith('backbone'):
                     p.requires_grad_(False)
 
-    def forward(self, x, pes,bbox_gt, expid,expma):
+    def forward(self, x, pes,bbox_gt, expid,expma, cap_id=None, cap_mask=None):
+        # ESI not supported on the LRE==0 path; accept+ignore caption args so
+        # callers that always pass them (main.py) don't crash on vanilla runs.
         outs,l,text_mask = self.forward_features(x, expid,expma)
         x = self.decode(outs,l,text_mask,pes,bbox_gt)
         return x

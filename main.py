@@ -100,6 +100,12 @@ def parse_option():
     parser.add_argument('--cf-loss', type=str, choices=['push', 'margin'], help="CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-margin))")
     parser.add_argument('--cf-margin', type=float, help="threshold for the 'margin' CF loss hinge")
 
+    # FlexHook-CF: ESI+HMSI explicit semantic injection (VLM captions)
+    parser.add_argument('--esi-enabled', action='store_true', help='enable ESI+HMSI caption injection')
+    parser.add_argument('--esi-cap-train', type=str, help='GT-trajectory captions json (train/val)')
+    parser.add_argument('--esi-cap-eval', type=str, help='tracker-trajectory captions json (test)')
+    parser.add_argument('--esi-kv-len', type=int, help='holistic caption tokens appended as 4th K/V stream')
+
     args, unparsed = parser.parse_known_args()
 
     config = get_config(args)
@@ -365,7 +371,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.time()
     end = time.time()
     sample_dict_for_save={}
-    for idx, (samples, pes,bbox_gt,targets, expid,expma, data_key,sampled_indices,sampled_target_exp,index,is_cf) in enumerate(data_loader):
+    for idx, (samples, pes,bbox_gt,targets, expid,expma, data_key,sampled_indices,sampled_target_exp,index,is_cf,caption_ids,caption_mask) in enumerate(data_loader):
 
         samples = samples.cuda(non_blocking=True) #btchw
 
@@ -374,6 +380,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
         pes = pes.cuda(non_blocking=True) # bt2hw
 
         bbox_gt = bbox_gt.cuda(non_blocking=True) #bt4
+        caption_ids = caption_ids.cuda(non_blocking=True)   # ESI: object-level caption tokens
+        caption_mask = caption_mask.cuda(non_blocking=True)
         sampled_target_exp=list(map(list, zip(*sampled_target_exp)))
 
         if config.noise3:
@@ -407,7 +415,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                     pes[replace2[0],replace2[1],:,:,:]=temp
 
         
-        outputs,regular = model(samples,pes,bbox_gt,expid,expma)
+        outputs,regular = model(samples,pes,bbox_gt,expid,expma,caption_ids,caption_mask)
 
         f_,t_,n_,c_ = outputs.shape
         
@@ -555,7 +563,7 @@ def validate(config, data_loader, model,epoch=0, writer=None,evaljson=None,gtjso
     gtFN = {}
 
     end = time.time()
-    for idx, (images,pes,bbox_gt, target,expid,expma) in enumerate(data_loader):
+    for idx, (images,pes,bbox_gt, target,expid,expma,caption_ids,caption_mask) in enumerate(data_loader):
 
         images = images.cuda(non_blocking=True)
         pes = pes.cuda(non_blocking=True)
@@ -565,8 +573,10 @@ def validate(config, data_loader, model,epoch=0, writer=None,evaljson=None,gtjso
         expma = expma.cuda(non_blocking=True)
 
         bbox_gt = bbox_gt.cuda(non_blocking=True)
+        caption_ids = caption_ids.cuda(non_blocking=True)
+        caption_mask = caption_mask.cuda(non_blocking=True)
 
-        output,bbox_offset = model(images,pes,bbox_gt,expid,expma)
+        output,bbox_offset = model(images,pes,bbox_gt,expid,expma,caption_ids,caption_mask)
 
 
         if len(output.shape)==4:
@@ -668,15 +678,15 @@ def inference(config, data_loader, model):
     batch_time = AverageMeter()
 
     end = time.time()
-    for idx, (images,pes,bbox_gt,exp,expid,expma,video,obj,frame_id,last) in enumerate(data_loader):
+    for idx, (images,pes,bbox_gt,exp,expid,expma,video,obj,frame_id,last,caption_ids,caption_mask) in enumerate(data_loader):
 
         images = images.cuda(non_blocking=True)
         pes = pes.cuda(non_blocking=True)
 
         bbox_gt = bbox_gt.cuda(non_blocking=True)
 
-
-        output,bbox_offset = model(images,pes,bbox_gt,expid,expma)
+        # caption_ids/caption_mask follow expid/expma's device handling in this loop
+        output,bbox_offset = model(images,pes,bbox_gt,expid,expma,caption_ids,caption_mask)
         
         if len(output.shape)==4: #btn2
             

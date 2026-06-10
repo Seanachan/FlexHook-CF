@@ -30,6 +30,18 @@ def load_counterfactuals(path):
         return json.load(f)
 
 
+def load_captions(path):
+    """Load a captions.json mapping {trajectory_key: caption_string} for ESI.
+
+    trajectory_key is ``f'{video}_{obj}'`` (matches data/mydataloader.py __getitem__).
+    Returns {} if the path is empty / missing so callers degrade to a no-op.
+    """
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, 'r') as f:
+        return json.load(f)
+
+
 def _variant_string(v):
     """Accept either a raw string variant or a {"expression", "attr_type"} dict."""
     if isinstance(v, dict):

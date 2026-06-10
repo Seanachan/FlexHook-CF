@@ -170,6 +170,18 @@ _C.CF_ATTR_TYPES = ['color', 'type', 'motion', 'location']  # attribute categori
 _C.CF_LOSS = 'push'         # CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-CF_MARGIN))
 _C.CF_MARGIN = 0.5          # threshold for the 'margin' hinge; only CFs scored above it are penalized
 
+# -----------------------------------------------------------------------------
+# Explicit Semantic Injection + Hierarchical Multi-Stream Integration (ESI+HMSI)
+# Defaults below are a no-op: ESI_ENABLED=False reproduces vanilla FlexHook.
+# Captions are object-level (per trajectory), used at TRAIN and INFERENCE.
+# Two caption files because train iterates GT trajectories, eval iterates tracker ones.
+# -----------------------------------------------------------------------------
+_C.ESI_ENABLED = False      # master switch; False => no caption stream, vanilla model
+_C.ESI_CAPTION_LEN = 25     # caption tokenization length (matches text_len)
+_C.ESI_KV_LEN = 1           # holistic caption tokens appended as 4th K/V stream (1=pooled)
+_C.ESI_CAP_TRAIN_JSON = ''  # GT-trajectory captions, key f'{video}_{gt_obj_id}' (train/val)
+_C.ESI_CAP_EVAL_JSON = ''   # tracker-trajectory captions, key f'{video}_{tracker_id}' (test)
+
 def _update_config_from_file(config, cfg_file):
     config.defrost()
     with open(cfg_file, 'r') as f:
@@ -233,6 +245,14 @@ def update_config(config, args):
         config.CF_LOSS = args.cf_loss
     if _check_args('cf_margin'):
         config.CF_MARGIN = args.cf_margin
+    if _check_args('esi_enabled') and args.esi_enabled:
+        config.ESI_ENABLED = True
+    if _check_args('esi_cap_train'):
+        config.ESI_CAP_TRAIN_JSON = args.esi_cap_train
+    if _check_args('esi_cap_eval'):
+        config.ESI_CAP_EVAL_JSON = args.esi_cap_eval
+    if _check_args('esi_kv_len'):
+        config.ESI_KV_LEN = args.esi_kv_len
     # print(config.LRE)
     # print(hasattr(args, 'lre'))
     # print( eval(f'args.lre'))
