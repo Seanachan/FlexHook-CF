@@ -14,12 +14,13 @@ Two archives (gdown pulls them by file ID — share as "anyone with link"):
   `tracker_outputs/Temp-NeuralSORT-kitti2/`, `cf_data/captions_{train,eval}.json`.
 roberta-base is NOT in either — it auto-downloads from HuggingFace on Colab.
 
-Build the core tarball locally:
+Build the core tarball locally (includes the qwen CF negatives for the CF screens):
 ```bash
 tar -czhf cf_data/flexhook_core.tar.gz \
   pretrained/swin_rope_mixed_tiny_patch4_window7_224 \
   datasets/refer-kitti-v2/{labels.json,expression,gt_template_gen,gt_template} \
-  tracker_outputs/Temp-NeuralSORT-kitti2 cf_data/captions_train.json cf_data/captions_eval.json
+  tracker_outputs/Temp-NeuralSORT-kitti2 cf_data/captions_train.json cf_data/captions_eval.json \
+  cf_data/counterfactuals-kitti2-qwen.json
 ```
 
 ## Cells
@@ -126,7 +127,30 @@ for tag in ['colab-base','colab-esi']:
 # GATE: esi per-expression mean > base per-expression mean
 ```
 
+## 9. CF screens — A0 re-baseline + A1 loss round 2 (plan 2026-06-11)
+
+The local 8GB/batch-1 ablation (docs/results-cf-ablation.md) is NOT comparable to this
+regime. Re-anchor first (A0), then screen (A1). All runs single-seed; multi-seed only on
+the final winner. Common stem (same as §6 baseline cell, change `--output` + append):
+
+```bash
+CF="--n-cf 3 --cf-json cf_data/counterfactuals-kitti2-qwen.json"
+# A0-1  vanilla re-baseline = §6 BASELINE cell (kitti-2/colab-base) — reuse if already run
+# A0-2  margin(0.5) re-anchor (local winner; does +0.29 survive the regime jump?)
+--output kitti-2/cf-m05        $CF --lambda-cf 1.0 --cf-loss margin --cf-margin 0.5
+# A1-1  margin sweep — recover push-loss AssA without DetA tax
+--output kitti-2/cf-m03        $CF --lambda-cf 1.0 --cf-loss margin --cf-margin 0.3
+--output kitti-2/cf-m04        $CF --lambda-cf 1.0 --cf-loss margin --cf-margin 0.4
+# A1-2  max-over-CF-slots (VSE++ hardest-only; needs commit with --cf-loss-agg)
+--output kitti-2/cf-m05-max    $CF --lambda-cf 1.0 --cf-loss margin --cf-margin 0.5 --cf-loss-agg max
+```
+Eval each via §8 with the matching `--output retest-kitti-2/<tag>` + `--resume
+kitti-2/<tag>/ckpt_epoch_best_0.pth` (CF runs need NO extra eval flags — CF is
+train-time only). Keep rule: HOTA > cf-m05 AND DetA ≥ colab-base. Record
+HOTA/DetA/AssA + val F1 per run in docs/results-cf-ablation.md (new Colab section).
+
 ## Notes
 - Single GPU (`--nproc_per_node=1`); batch-7 ≈ 4.5 GB on T4 (plenty of headroom).
 - ESI eval MUST pass `--esi-enabled` + caption JSONs (captions feed the matcher at inference).
 - Stage 4: add `--n-cf 3 --lambda-cf 1.0 --cf-loss margin --cf-margin 0.5 --cf-json <kitti2 cf json>` on top of the ESI train cell.
+- `--cf-loss-agg {mean|max}` (default mean) added 2026-06-11; smoke_test_cf.py covers it (61 asserts).

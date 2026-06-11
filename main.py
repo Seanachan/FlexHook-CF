@@ -99,6 +99,7 @@ def parse_option():
     parser.add_argument('--cf-json', type=str, help='path to counterfactuals.json')
     parser.add_argument('--cf-loss', type=str, choices=['push', 'margin'], help="CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-margin))")
     parser.add_argument('--cf-margin', type=float, help="threshold for the 'margin' CF loss hinge")
+    parser.add_argument('--cf-loss-agg', type=str, choices=['mean', 'max'], help="CF slot aggregation: 'mean' (all slots) or 'max' (hardest CF per anchor, VSE++ max-of-hinges)")
 
     # FlexHook-CF: ESI+HMSI explicit semantic injection (VLM captions)
     parser.add_argument('--esi-enabled', action='store_true', help='enable ESI+HMSI caption injection')
@@ -459,6 +460,10 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
           'margin' : L_cf = relu(P_match - CF_MARGIN) (hinge; zero gradient on
                      CFs already scored below the margin -> push concentrated on
                      hard negatives only, leaves DetA alone)
+        Slot aggregation (config.CF_LOSS_AGG):
+          'mean' : average over all CF slots (original)
+          'max'  : hardest CF per (sample, layer) anchor only (VSE++ max-of-hinges;
+                   small-violation CFs stop diluting/dominating the gradient)
         No-op when LAMBDA_CF<=0 or no CF slots present in the batch.'''
         if config.LAMBDA_CF > 0:
             cf_mask = is_cf.cuda(non_blocking=True).unsqueeze(1).repeat(1, t_, 1).flatten().float()
@@ -468,7 +473,13 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                     loss_cf = F.relu(p_match - config.CF_MARGIN)
                 else:
                     loss_cf = -torch.log((1.0 - p_match).clamp_min(1e-6))
-                loss_cf = (loss_cf * cf_mask).sum() / cf_mask.sum()
+                if config.CF_LOSS_AGG == 'max':
+                    # per-anchor hardest CF: rows = (sample, layer), cols = N slots
+                    lc = (loss_cf * cf_mask).view(f_ * t_, n_)
+                    has_cf = cf_mask.view(f_ * t_, n_).sum(1) > 0
+                    loss_cf = lc.max(dim=1).values[has_cf].mean()
+                else:
+                    loss_cf = (loss_cf * cf_mask).sum() / cf_mask.sum()
                 loss = loss + config.LAMBDA_CF * loss_cf
 
         loss = loss+regular

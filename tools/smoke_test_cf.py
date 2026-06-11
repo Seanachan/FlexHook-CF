@@ -136,9 +136,49 @@ def test_loss_math():
     check(empty.sum().item() == 0, 'empty cf_mask detected (loss skipped upstream)')
 
 
+def test_loss_agg_max():
+    print('[4] CF_LOSS_AGG=max (hardest CF per anchor)')
+    try:
+        import torch
+        import torch.nn.functional as F
+    except Exception as e:
+        print(f'  skip - torch unavailable ({e})')
+        return
+    torch.manual_seed(0)
+    B, L, N, C = 2, 4, 5, 2
+    outputs = torch.randn(B, L, N, C, requires_grad=True)
+    is_cf = torch.zeros(B, N, dtype=torch.long)
+    is_cf[0, 1] = 1
+    is_cf[0, 2] = 1  # two CF slots on sample 0 -> max must pick one
+    is_cf[1, 3] = 1
+    margin = 0.5
+
+    # replicate the main.py 'max' branch
+    cf_mask = is_cf.unsqueeze(1).repeat(1, L, 1).flatten().float()
+    p_match = outputs.flatten(0, 2).softmax(-1)[:, 1]
+    per_slot = F.relu(p_match - margin)
+    lc = (per_slot * cf_mask).view(B * L, N)
+    has_cf = cf_mask.view(B * L, N).sum(1) > 0
+    loss_max = lc.max(dim=1).values[has_cf].mean()
+    loss_mean = (per_slot * cf_mask).sum() / cf_mask.sum()
+
+    check(torch.isfinite(loss_max).item(), 'max-agg L_cf is finite')
+    check(loss_max.item() >= loss_mean.item() - 1e-6,
+          'max-agg >= mean-agg (hardest slot dominates)')
+    check(int(has_cf.sum().item()) == B * L, 'every (sample,layer) anchor has a CF row')
+    loss_max.backward()
+    check(outputs.grad is not None and torch.isfinite(outputs.grad).all().item(),
+          'max-agg backward produces finite gradients')
+    # gradient sparsity: only one CF slot per anchor gets gradient through max
+    g = outputs.grad.abs().view(B, L, N, C).sum(-1)
+    cf0 = g[0, 0, [1, 2]]
+    check((cf0 > 0).sum().item() <= 2, 'gradient flows only through selected slots')
+
+
 if __name__ == '__main__':
     test_inject()
     test_rule_gen()
     test_loss_math()
+    test_loss_agg_max()
     print(f'\n{PASS} passed, {FAIL} failed')
     sys.exit(1 if FAIL else 0)

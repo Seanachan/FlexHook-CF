@@ -169,6 +169,7 @@ _C.CF_JSON_PATH = ''        # path to counterfactuals.json (base-expression -> [
 _C.CF_ATTR_TYPES = ['color', 'type', 'motion', 'location']  # attribute categories allowed for injection
 _C.CF_LOSS = 'push'         # CF loss form: 'push' (-log(1-P)) or 'margin' (relu(P-CF_MARGIN))
 _C.CF_MARGIN = 0.5          # threshold for the 'margin' hinge; only CFs scored above it are penalized
+_C.CF_LOSS_AGG = 'mean'     # CF slot aggregation: 'mean' (all slots) or 'max' (hardest per anchor)
 
 # -----------------------------------------------------------------------------
 # Explicit Semantic Injection + Hierarchical Multi-Stream Integration (ESI+HMSI)
@@ -245,6 +246,8 @@ def update_config(config, args):
         config.CF_LOSS = args.cf_loss
     if _check_args('cf_margin'):
         config.CF_MARGIN = args.cf_margin
+    if _check_args('cf_loss_agg'):
+        config.CF_LOSS_AGG = args.cf_loss_agg
     if _check_args('esi_enabled') and args.esi_enabled:
         config.ESI_ENABLED = True
     if _check_args('esi_cap_train'):
