@@ -1,101 +1,132 @@
-# Colab setup — ESI+HMSI training (Stage 3)
+# Colab setup — ESI+HMSI training (Stage 3), streamlined
 
-Goal: on a Colab GPU (T4 16 GB, headless), train **baseline** and **ESI+HMSI** at
-**batch-7** (recovers the ~2.5 HOTA the 8 GB/batch-1 regime cost us), then eval
-**per-expression** (NOT pooled COMBINED — the artifact that burned us). Captioning
-already done locally → only the 2 JSONs travel.
+Validated on a Colab **T4 (16 GB)**, driven cell-by-cell. batch-7 fits in ~4.5 GB.
+Captioning is done locally; only annotations + images travel. Evaluate
+**per-expression** (NOT pooled COMBINED — a pooling artifact already burned us).
 
-## Prerequisites (manual, you)
-1. Restart Claude Code so colab-mcp tools load.
-2. Colab: Runtime → Change runtime type → **GPU**. Run colab-mcp's connect cell + Google auth.
-3. Put on Google Drive (e.g. `MyDrive/flexhook/`):
-   - `datasets/refer-kitti-v2/` (KITTI images under `KITTI/training/image_02/`, `labels.json`, `expression/`, `gt_template_gen/`, `gt_template/`)
-   - `pretrained/` (`roberta-base/`, `swin_rope_mixed_tiny_patch4_window7_224/`)
-   - `tracker_outputs/Temp-NeuralSORT-kitti2/`
-   - `cf_data/captions_train.json`, `cf_data/captions_eval.json`
+## Data on Google Drive (you upload once, share links)
+Two archives (gdown pulls them by file ID — share as "anyone with link"):
+- **images**: a 7z of `*/KITTI/training/image_02/<video>/*.png` for videos 0000-0020.
+  NOTE: a **Refer-KITTI V1** image archive works fine for V2 — KITTI frames are shared;
+  only annotations differ. Confirm it has all 21 video folders.
+- **core tarball** (`flexhook_core.tar.gz`, ~137 M, built locally): V2 `labels.json`,
+  `expression/`, `gt_template_gen/`, `gt_template/`, `pretrained/swin_*`,
+  `tracker_outputs/Temp-NeuralSORT-kitti2/`, `cf_data/captions_{train,eval}.json`.
+roberta-base is NOT in either — it auto-downloads from HuggingFace on Colab.
 
-## Cells (run in order once connected)
-
-### 1. GPU + clone
+Build the core tarball locally:
 ```bash
-!nvidia-smi --query-gpu=name,memory.total --format=csv
+tar -czhf cf_data/flexhook_core.tar.gz \
+  pretrained/swin_rope_mixed_tiny_patch4_window7_224 \
+  datasets/refer-kitti-v2/{labels.json,expression,gt_template_gen,gt_template} \
+  tracker_outputs/Temp-NeuralSORT-kitti2 cf_data/captions_train.json cf_data/captions_eval.json
+```
+
+## Cells
+
+### 0. Set Runtime → GPU (T4) FIRST, then:
+```bash
 !git clone https://github.com/Seanachan/FlexHook-CF.git
-%cd FlexHook-CF
-!git log --oneline -3   # expect 8f671ce ESI graft, b48e233 GT captioner
+%cd /content/FlexHook-CF
+!nvidia-smi --query-gpu=name,memory.total --format=csv
 ```
 
-### 2. Environment (Colab has torch preinstalled; add the rest)
+### 1. Deps (one shot — all of them)
 ```bash
-!pip -q install transformers==4.57.6 timm einops scipy pyyaml yacs termcolor opencv-python
-!python -c "import torch,transformers;print('torch',torch.__version__,'cuda',torch.cuda.is_available(),'tf',transformers.__version__)"
-```
-> If torch/cu mismatch surfaces, pin to match (ROPE-ViT configs still apply per README). Verify CUDA True before training.
-
-### 3. Mount Drive + symlink data (no copy)
-```bash
-from google.colab import drive; drive.mount('/content/drive')
-D='/content/drive/MyDrive/flexhook'   # adjust to your Drive layout
-import os
-for src,dst in [(f'{D}/datasets/refer-kitti-v2','datasets/refer-kitti-v2'),
-                (f'{D}/pretrained/roberta-base','pretrained/roberta-base'),
-                (f'{D}/pretrained/swin_rope_mixed_tiny_patch4_window7_224','pretrained/swin_rope_mixed_tiny_patch4_window7_224'),
-                (f'{D}/tracker_outputs/Temp-NeuralSORT-kitti2','tracker_outputs/Temp-NeuralSORT-kitti2')]:
-    os.makedirs(os.path.dirname(dst),exist_ok=True)
-    if not os.path.exists(dst): os.symlink(src,dst)
-os.makedirs('cf_data',exist_ok=True)
-!cp "$D/cf_data/captions_train.json" "$D/cf_data/captions_eval.json" cf_data/
-!ls -la datasets/refer-kitti-v2 pretrained cf_data
+!pip -q install -r requirements-colab.txt
+!python -c "import torch,transformers;print(torch.__version__, torch.cuda.is_available(), transformers.__version__)"
 ```
 
-### 4. Smoke tests (must pass before training)
+### 2. Data — gdown both archives, extract (set your file IDs)
+```python
+import gdown, os
+IMG_ID  = "1QmY9nXA-WmBOF44xmTBvOeFrQWLYCHMl"   # images 7z
+CORE_ID = "1aFssnRBYsTYWALtgZombwNmEYguk55F2"   # flexhook_core.tar.gz
+gdown.download(id=IMG_ID,  output="/content/imgs.7z", quiet=False)
+gdown.download(id=CORE_ID, output="/content/core.tar.gz", quiet=False)
+!apt-get -qq install -y p7zip-full >/dev/null
+# images: extract image_02, symlink into the V2 path (frames are shared V1/V2)
+!cd /content && 7z x imgs.7z "*/KITTI/training/image_02/*" -o/content/imgs -y >/dev/null
+imgdir = [r for r,_,f in os.walk('/content/imgs') if r.endswith('image_02')][0]
+os.makedirs('/content/FlexHook-CF/datasets/refer-kitti-v2/KITTI/training', exist_ok=True)
+!ln -sfn "$imgdir" /content/FlexHook-CF/datasets/refer-kitti-v2/KITTI/training/image_02
+# core: V2 annotations + swin + tracker + captions
+!tar -xzf /content/core.tar.gz -C /content/FlexHook-CF
+print('image videos:', len(os.listdir('/content/FlexHook-CF/datasets/refer-kitti-v2/KITTI/training/image_02')))
+```
+
+### 3. roberta-base from HuggingFace
+```python
+from transformers import AutoTokenizer, AutoModel
+p='/content/FlexHook-CF/pretrained/roberta-base'
+AutoTokenizer.from_pretrained('roberta-base').save_pretrained(p)
+AutoModel.from_pretrained('roberta-base').save_pretrained(p)
+```
+
+### 4. Smoke tests (gate — must be green before training)
 ```bash
+%cd /content/FlexHook-CF
 !python tools/smoke_test_cf.py | tail -1
-!python tools/smoke_test_esi.py | tail -1
+!python tools/smoke_test_esi.py | tail -1   # expect 23 passed
 ```
 
-### 5. Train — baseline then ESI (batch-7; checkpoint to Drive for session limits)
+### 5. Drive checkpoint-sync (survives runtime disconnect)
+```python
+from google.colab import drive; drive.mount('/content/drive')
+import os; DST='/content/drive/MyDrive/flexhook/ckpts'; os.makedirs(DST, exist_ok=True)
+!nohup bash -c 'while true; do rsync -a /content/FlexHook-CF/kitti-2/ '"$DST"'/kitti-2/ 2>/dev/null; cp /content/*.log '"$DST"'/ 2>/dev/null; sleep 600; done' >/content/cksync.log 2>&1 &
+```
+
+### 6. Train (background nohup; survives bridge drops) — baseline then ESI
 ```bash
-# BASELINE (no ESI) — the same-machine reference, batch-7
-!OMP_NUM_THREADS=1 python -m torch.distributed.launch --nproc_per_node=1 --master-port 29711 main.py \
-  --cfg configs/train/train-kitti2.yaml --data-path 12 --output kitti-2/colab-base \
-  --batch-size 7 --val-batch-size 40 --visual rope-swin-tiny --text roberta --pretrained src \
-  --freeze-text --freeze-visual
-
-# ESI+HMSI
-!OMP_NUM_THREADS=1 python -m torch.distributed.launch --nproc_per_node=1 --master-port 29712 main.py \
-  --cfg configs/train/train-kitti2.yaml --data-path 12 --output kitti-2/colab-esi \
-  --batch-size 7 --val-batch-size 40 --visual rope-swin-tiny --text roberta --pretrained src \
-  --freeze-text --freeze-visual \
-  --esi-enabled --esi-cap-train cf_data/captions_train.json --esi-cap-eval cf_data/captions_eval.json
+%cd /content/FlexHook-CF
+# BASELINE
+!OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup \
+ python -m torch.distributed.launch --nproc_per_node=1 --master-port 29721 main.py \
+ --cfg configs/train/train-kitti2.yaml --data-path 12 --output kitti-2/colab-base \
+ --batch-size 7 --val-batch-size 40 --visual rope-swin-tiny --text roberta --pretrained src \
+ --freeze-text --freeze-visual > /content/base.log 2>&1 &
+# ESI (after baseline finishes, or in a later session)
+!OMP_NUM_THREADS=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup \
+ python -m torch.distributed.launch --nproc_per_node=1 --master-port 29722 main.py \
+ --cfg configs/train/train-kitti2.yaml --data-path 12 --output kitti-2/colab-esi \
+ --batch-size 7 --val-batch-size 40 --visual rope-swin-tiny --text roberta --pretrained src \
+ --freeze-text --freeze-visual \
+ --esi-enabled --esi-cap-train cf_data/captions_train.json --esi-cap-eval cf_data/captions_eval.json \
+ > /content/esi.log 2>&1 &
 ```
-> AUTO_RESUME is on — if a session drops, copy `kitti-2/colab-*` to Drive and re-run the same cell to resume. (Or add `!cp -r kitti-2 $D/` checkpoints periodically.)
+Tail: `!grep -E "Train: \[|Error|out of memory" /content/base.log | tail -3`
+(~30 min/epoch on T4, 1746 iters/epoch at batch-7, 20 epochs ≈ 10 h.)
 
-### 6. Eval (per-expression) — for each best ckpt
+### 7. Resume after a runtime disconnect
+Re-run cells 0-5, then restore checkpoints from Drive and relaunch with the SAME
+`--output` (AUTO_RESUME continues from the last epoch):
 ```bash
-!OMP_NUM_THREADS=1 python -m torch.distributed.launch --nproc_per_node=1 --master-port 29713 main.py \
-  --cfg configs/infer/kitti2.yaml --track-root tracker_outputs/Temp-NeuralSORT-kitti2 --data-path 12 \
-  --output retest-kitti-2/colab-esi --val-batch-size 40 --visual rope-swin-tiny --text roberta \
-  --eval --resume kitti-2/colab-esi/ckpt_epoch_best_0.pth
-# repeat for colab-base
+!mkdir -p kitti-2 && rsync -a /content/drive/MyDrive/flexhook/ckpts/kitti-2/ kitti-2/
+# then re-run the matching train cell in §6
 ```
 
-### 7. Per-expression verdict (NOT pooled COMBINED)
+### 8. Eval (per-expression) — each best ckpt
+```bash
+!OMP_NUM_THREADS=1 python -m torch.distributed.launch --nproc_per_node=1 --master-port 29731 main.py \
+ --cfg configs/infer/kitti2.yaml --track-root tracker_outputs/Temp-NeuralSORT-kitti2 --data-path 12 \
+ --output retest-kitti-2/colab-esi --val-batch-size 40 --visual rope-swin-tiny --text roberta \
+ --eval --resume kitti-2/colab-esi/ckpt_epoch_best_0.pth
+ # (ESI eval also needs --esi-enabled --esi-cap-train ... --esi-cap-eval ...)
+```
 ```python
 import csv, statistics
-def per_expr_hota(p):
+def hota(p):
     rows=[r for r in csv.DictReader(open(p)) if r['seq']!='COMBINED']
-    return statistics.mean(float(r['HOTA___AUC']) for r in rows)*100, float([r for r in csv.DictReader(open(p)) if r['seq']=='COMBINED'][0]['HOTA___AUC'])*100
+    comb=[r for r in csv.DictReader(open(p)) if r['seq']=='COMBINED'][0]
+    return statistics.mean(float(r['HOTA___AUC']) for r in rows)*100, float(comb['HOTA___AUC'])*100
 for tag in ['colab-base','colab-esi']:
-    m,c=per_expr_hota(f'retest-kitti-2/{tag}/results/pedestrian_detailed.csv')
-    print(f'{tag}: per-expression mean HOTA {m:.2f} | pooled COMBINED {c:.2f}')
+    m,c=hota(f'retest-kitti-2/{tag}/results/pedestrian_detailed.csv')
+    print(f'{tag}: per-expression mean {m:.2f} | pooled COMBINED {c:.2f}')
 # GATE: esi per-expression mean > base per-expression mean
 ```
 
-## Then Stage 4
-Re-run ESI training with `--n-cf 3 --lambda-cf 1.0 --cf-loss margin --cf-margin 0.5
---cf-json <kitti2 counterfactuals>` stacked on `--esi-enabled` → does ESI+CFL beat each alone (per-expression)?
-
-## Notes / risks
-- Single GPU (`--nproc_per_node=1`); batch-7 fits 16 GB with ESI (local ESI peak was ~3.8 GB at batch-1).
-- Caption JSON keys: train=GT obj ids, eval=tracker ids (already generated correctly).
-- If deps fight Colab's torch, the only hard requirement is a working CUDA torch + transformers + timm/einops; the model is otherwise self-contained.
+## Notes
+- Single GPU (`--nproc_per_node=1`); batch-7 ≈ 4.5 GB on T4 (plenty of headroom).
+- ESI eval MUST pass `--esi-enabled` + caption JSONs (captions feed the matcher at inference).
+- Stage 4: add `--n-cf 3 --lambda-cf 1.0 --cf-loss margin --cf-margin 0.5 --cf-json <kitti2 cf json>` on top of the ESI train cell.

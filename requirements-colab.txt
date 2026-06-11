@@ -1,0 +1,21 @@
+# Colab deps for FlexHook-CF (torch is preinstalled on Colab — do NOT pin it).
+# One-shot:  pip install -r requirements-colab.txt
+# Captures every dep discovered while bringing up Stage-3 ESI training on Colab T4,
+# including the ones only main.py / the model / dataloader import (not the smoke tests):
+#   ftfy (CLIP_my), wordninja (mix dataloader), fvcore (mymodel weight_init),
+#   tensorboardX (main.py logger), info-nce-pytorch (loss.py dead-but-imported InfoNCE).
+transformers==4.57.6
+timm
+einops
+scipy
+pyyaml
+yacs
+termcolor
+opencv-python
+ftfy
+wordninja
+regex
+fvcore
+tensorboardX
+info-nce-pytorch
+gdown
