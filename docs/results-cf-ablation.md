@@ -1,5 +1,10 @@
 # FlexHook-CF — Counterfactual Hard-Negative Ablation (Refer-KITTI-V2)
 
+> **SUPERSEDED (2026-06-12):** the headline "margin loss beats baseline (+0.29)"
+> below is a **pooled-COMBINED artifact** — per-expression scoring shows the same
+> run at −5.2 vs baseline. The push-vs-margin *mechanics* (§Findings 1–3) remain
+> valid. Full updated matrix + metric methodology: `results-ablation-esi-cf.md`.
+
 **Date:** 2026-06-09 · **Regime:** single RTX 3060 Ti (8 GB), `--batch-size 1`,
 frozen encoders (`--freeze-text --freeze-visual`), 20 epochs, ROPE-Swin-T + RoBERTa,
 tracker `Temp-NeuralSORT-kitti2`. All runs share this regime, so the valid

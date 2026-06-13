@@ -14,7 +14,7 @@ This is a **two-stage referring-by-tracking** system, NOT end-to-end. Understand
 
 1. **An off-the-shelf tracker runs first** (TempRMOT+NeuralSORT) and its bbox trajectories are pre-computed into `tracker_outputs/<TRACKER_ROOT>/<video>/{car,pedestrian}/predict.txt`. This repo only trains/evaluates the *referring head* that scores trajectory↔expression matches. Inference reads tracker outputs via `--track-root`.
 
-2. **Frozen encoders, cheap training.** Visual = ROPE-Swin-T (`models/swin_transformer_rope.py`, `vit_rope.py`), text = RoBERTa (or CLIP/BERT), both frozen. Only the small referring head trains → the paper's ~0.77 h training.
+2. **Cheap training via C-Hook, NOT frozen encoders.** Visual = ROPE-Swin-T (`models/swin_transformer_rope.py`, `vit_rope.py`), text = RoBERTa (or CLIP/BERT). ⚠️ The stock `train.sh` does **not** freeze anything (config defaults `freeze_text/visual=False`); the ~0.77 h training comes from C-Hook avoiding per-expression re-encoding. `--freeze-text --freeze-visual` is an off-paper low-VRAM regime (8 GB cards) — results there are not comparable to the paper's (≈ −0.8 pooled HOTA even after unfreezing on 1 GPU; see `docs/results-ablation-esi-cf.md`).
 
 3. **Per-trajectory matching.** A training sample = **one object trajectory + N expressions** (`sample_expression_num`), with binary match labels. This is built in `data/mydataloader.py::RMOT_Dataset.__getitem__`. Labels: `1 if expr in data['expression'][last_frame] else 0`.
 
