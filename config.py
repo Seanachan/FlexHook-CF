@@ -183,6 +183,20 @@ _C.ESI_KV_LEN = 1           # holistic caption tokens appended as 4th K/V stream
 _C.ESI_CAP_TRAIN_JSON = ''  # GT-trajectory captions, key f'{video}_{gt_obj_id}' (train/val)
 _C.ESI_CAP_EVAL_JSON = ''   # tracker-trajectory captions, key f'{video}_{tracker_id}' (test)
 
+# -----------------------------------------------------------------------------
+# L1 query-conditioned object representation (QCOND).
+# Default no-op: QCOND_ENABLED=False reproduces vanilla FlexHook.
+# When True, the (otherwise text-blind, shared-across-N) object feature obj_f is
+# FiLM-modulated by each expression's pooled text -> a per-(query,object) feature,
+# appended block-diagonally so expression j only sees its own obj block.
+# Identity-initialized so an untrained QCOND head == vanilla at step 0.
+# -----------------------------------------------------------------------------
+_C.QCOND_ENABLED = False    # master switch; False => shared text-blind obj_f, vanilla model
+# Residual/augment mode: keep the shared obj_f stream (visible to all N) AND add the
+# block-diagonal conditioned stream. False => conditioned block REPLACES the shared one
+# (replace-mode destroys color grounding empirically). Requires QCOND_ENABLED.
+_C.QCOND_RESIDUAL = False
+
 def _update_config_from_file(config, cfg_file):
     config.defrost()
     with open(cfg_file, 'r') as f:
@@ -256,6 +270,11 @@ def update_config(config, args):
         config.ESI_CAP_EVAL_JSON = args.esi_cap_eval
     if _check_args('esi_kv_len'):
         config.ESI_KV_LEN = args.esi_kv_len
+    if _check_args('qcond') and args.qcond:
+        config.QCOND_ENABLED = True
+    if _check_args('qcond_residual') and args.qcond_residual:
+        config.QCOND_ENABLED = True       # residual implies enabled
+        config.QCOND_RESIDUAL = True
     # print(config.LRE)
     # print(hasattr(args, 'lre'))
     # print( eval(f'args.lre'))

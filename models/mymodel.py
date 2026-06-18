@@ -223,6 +223,24 @@ class MyModel(nn.Module):
                 self.hmsi_fuse_norm.append(nn.LayerNorm(self.text_dim))
                 self.hmsi_out.append(Mlp_resid(self.text_dim, self.text_dim, self.text_dim))
 
+        '''L1 query-conditioned object representation (QCOND). Per layer, FiLM the
+        otherwise text-blind obj_f by each expression's pooled text -> a per-(query,
+        object) feature, appended block-diagonally. Gated on cfg.QCOND_ENABLED.
+        gamma/beta zero-initialized => obj_f*(1+0)+0 == obj_f at step 0 (identity),
+        so an untrained head is bit-identical to vanilla. No-op when disabled.'''
+        self.qcond_enabled = bool(getattr(cfg, 'QCOND_ENABLED', False))
+        self.qcond_residual = bool(getattr(cfg, 'QCOND_RESIDUAL', False))   # augment (keep shared obj_f) vs replace
+        if self.qcond_enabled:
+            self.qcond_text_norm = nn.ModuleList()
+            self.qcond_gamma = nn.ModuleList()
+            self.qcond_beta = nn.ModuleList()
+            for i_layer in range(self.num_layers):
+                self.qcond_text_norm.append(nn.LayerNorm(self.text_dim))
+                g = nn.Linear(self.text_dim, self.text_dim); nn.init.zeros_(g.weight); nn.init.zeros_(g.bias)
+                bta = nn.Linear(self.text_dim, self.text_dim); nn.init.zeros_(bta.weight); nn.init.zeros_(bta.bias)
+                self.qcond_gamma.append(g)
+                self.qcond_beta.append(bta)
+
         if cfg.freeze_text:
             print('freeze text encoder !!!')
             for pn,p in  self.named_parameters():
@@ -373,37 +391,60 @@ class MyModel(nn.Module):
                 g = torch.sigmoid(self.hmsi_gate[i](torch.cat([obj_vec,cap_vec],dim=-1)))# (B,1,C)
                 caption_f = self.hmsi_out[i](self.hmsi_fuse_norm[i](obj_vec + g*cap_vec))# (B,1,C)
 
-            if caption_f is not None:
-                kv = torch.cat([text.flatten(1,2),conditional_f,obj_f,caption_f],dim=1)
-                kvpos = torch.cat([text_pos.flatten(1,2),torch.zeros_like(conditional_f),torch.zeros_like(obj_f),torch.zeros_like(caption_f)],dim=1)
-            else:
-                kv = torch.cat([text.flatten(1,2),conditional_f,obj_f],dim=1) #
-                kvpos = torch.cat([text_pos.flatten(1,2),torch.zeros_like(conditional_f),torch.zeros_like(obj_f)],dim=1)
-            # kvpos = torch.cat([text_pos,self.absolute_pos_objf_embed[i].repeat(b*n,1,1)],dim=1)
+            # --- L1 QCOND: FiLM-modulate obj_f by each expression's pooled text into a
+            # per-(query,object) block-diagonal stream. Two modes:
+            #   replace  (qcond_enabled, not residual): the conditioned block REPLACES the
+            #            shared text-blind obj_f -> matcher loses the un-modulated path
+            #            (empirically destroys color grounding).
+            #   residual (qcond_residual): AUGMENT, not replace -> emit BOTH the shared
+            #            obj_f (visible to all N, preserves fine color/attribute grounding)
+            #            AND the conditioned block-diagonal stream (per-query association).
+            # vanilla/ESI (not qcond): shared obj_f only, visible to all N.
+            Lobj = obj_f.shape[1]
+            qcond = self.qcond_enabled
+            residual = qcond and self.qcond_residual
+            if qcond:
+                tm = text_mask.unsqueeze(-1).to(obj_f.dtype)                       # (B,N,text_len,1)
+                t_n = (text*tm).sum(2)/tm.sum(2).clamp_min(1e-6)                   # (B,N,C) pooled text
+                t_n = self.qcond_text_norm[i](t_n)
+                gamma = self.qcond_gamma[i](t_n).unsqueeze(2)                      # (B,N,1,C)
+                beta = self.qcond_beta[i](t_n).unsqueeze(2)                        # (B,N,1,C)
+                cond_block = (obj_f.unsqueeze(1)*(1+gamma)+beta).flatten(1,2)      # (B,N*Lobj,C)
 
-            # rec_atten_mask = torch.zeros((b,n,1,1,self.text_len+obj_f.shape[1]+10),device=rec_q.device)
-            # for j in range(self.sample_expression_num):
-            #     rec_atten_mask[:,j,0,:,:self.text_len]=text_mask[:,j].unsqueeze(1).repeat(1,self.qnum,1)
-            # rec_atten_mask[:,:,:,:,self.text_len:]=1
-            # rec_atten_mask = rec_atten_mask.bool()
-            # rec_q = self.output_ca_qkv[i](rec_q,kv,
-            #                             None,kvpos,
-            #                             rec_atten_mask.flatten(0,1)) #b*8,2,c
+            if residual:
+                obj_streams = [obj_f, cond_block]      # shared (visible-all) + per-query (block-diag)
+            elif qcond:
+                obj_streams = [cond_block]             # replace
+            else:
+                obj_streams = [obj_f]                  # vanilla / ESI shared
+
+            streams = [text.flatten(1,2), conditional_f] + obj_streams
+            pos_streams = [text_pos.flatten(1,2), torch.zeros_like(conditional_f)] + \
+                          [torch.zeros_like(s) for s in obj_streams]
+            if caption_f is not None:
+                streams.append(caption_f); pos_streams.append(torch.zeros_like(caption_f))
+            kv = torch.cat(streams, dim=1)
+            kvpos = torch.cat(pos_streams, dim=1)
 
             cap_len = caption_f.shape[1] if caption_f is not None else 0
             obj_start = self.text_len*n + self.condition_num*n
-            rec_atten_mask = torch.zeros((b,1,n, obj_start + obj_f.shape[1] + cap_len),device=rec_q.device)
+            obj_total = sum(s.shape[1] for s in obj_streams)                       # Lobj / N*Lobj / (Lobj+N*Lobj)
+            rec_atten_mask = torch.zeros((b,1,n, obj_start + obj_total + cap_len),device=rec_q.device)
 
+            cond_off = obj_start + (Lobj if residual else 0)                       # start of block-diagonal block
             for j in range(self.sample_expression_num):
-                rec_atten_mask[:,0,j,j*self.text_len:(j+1)*self.text_len]=text_mask[:,j]#.unsqueeze(1).repeat(1,self.qnum,1)
-                rec_atten_mask[:,0,j,n*self.text_len+j*self.condition_num:n*self.text_len+(j+1)*self.condition_num]=1#.unsqueeze(1).repeat(1,self.qnum,1)
+                rec_atten_mask[:,0,j,j*self.text_len:(j+1)*self.text_len]=text_mask[:,j]
+                rec_atten_mask[:,0,j,n*self.text_len+j*self.condition_num:n*self.text_len+(j+1)*self.condition_num]=1
+                if qcond:
+                    # block-diagonal: expression j sees ONLY its own conditioned obj block
+                    rec_atten_mask[:,0,j, cond_off+j*Lobj:cond_off+(j+1)*Lobj]=1
 
-            # object features visible to all N expressions. Anchored by explicit
-            # start index (NOT the trailing slice) so an ESI caption block can follow.
-            rec_atten_mask[:,:,:, obj_start:obj_start+obj_f.shape[1]]=1
+            if residual or not qcond:
+                # shared object features visible to all N (vanilla / ESI / residual's shared path)
+                rec_atten_mask[:,:,:, obj_start:obj_start+Lobj]=1
             if cap_len:
-                # caption is object-level -> visible to all N expressions (like obj_f)
-                rec_atten_mask[:,:,:, obj_start+obj_f.shape[1]:]=1
+                # caption is object-level -> visible to all N expressions
+                rec_atten_mask[:,:,:, obj_start+obj_total:]=1
 
             rec_atten_mask = rec_atten_mask.bool()
             rec_q = self.output_ca_qkv[i](rec_q,kv,

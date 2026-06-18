@@ -106,6 +106,8 @@ def parse_option():
     parser.add_argument('--esi-cap-train', type=str, help='GT-trajectory captions json (train/val)')
     parser.add_argument('--esi-cap-eval', type=str, help='tracker-trajectory captions json (test)')
     parser.add_argument('--esi-kv-len', type=int, help='holistic caption tokens appended as 4th K/V stream')
+    parser.add_argument('--qcond', action='store_true', help='L1: query-condition obj_f via per-expression FiLM (block-diagonal obj block)')
+    parser.add_argument('--qcond-residual', action='store_true', help='L1 augment mode: keep shared obj_f stream AND add the conditioned block (implies --qcond)')
 
     args, unparsed = parser.parse_known_args()
 
